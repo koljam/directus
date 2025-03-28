@@ -201,9 +201,10 @@ type AddJoinProps = {
 	rootQuery: Knex.QueryBuilder;
 	schema: SchemaOverview;
 	knex: Knex;
+	indexInAndArray: number | undefined;
 };
 
-function addJoin({ path, collection, aliasMap, rootQuery, schema, relations, knex }: AddJoinProps) {
+function addJoin({ path, collection, aliasMap, rootQuery, schema, relations, knex, indexInAndArray }: AddJoinProps) {
 	let hasMultiRelational = false;
 	let isJoinAdded = false;
 
@@ -230,10 +231,19 @@ function addJoin({ path, collection, aliasMap, rootQuery, schema, relations, kne
 
 		if (!existingAlias) {
 			const alias = generateAlias();
-			const aliasKey = parentFields ? `${parentFields}.${pathParts[0]}` : pathParts[0]!;
-			const aliasedParentCollection = aliasMap[parentFields ?? '']?.alias || parentCollection;
 
-			aliasMap[aliasKey] = { alias, collection: '' };
+			const aliasKey = parentFields ? `${parentFields}.${pathParts[0]}` : pathParts[0]!;
+
+			// If we're in an _and context, make the key unique using the index
+			const finalAliasKey = indexInAndArray !== undefined ? `${aliasKey}__and${indexInAndArray}` : aliasKey;
+
+			aliasMap[finalAliasKey] = { alias, collection: '' };
+
+			// For parent lookup, we need to use the same suffix if it exists
+			const parentAliasKey =
+				parentFields && indexInAndArray !== undefined ? `${parentFields}__and${indexInAndArray}` : parentFields ?? '';
+
+			const aliasedParentCollection = aliasMap[parentAliasKey]?.alias || parentCollection;
 
 			if (relationType === 'm2o') {
 				rootQuery.leftJoin(
@@ -242,7 +252,7 @@ function addJoin({ path, collection, aliasMap, rootQuery, schema, relations, kne
 					`${alias}.${schema.collections[relation.related_collection!]!.primary}`,
 				);
 
-				aliasMap[aliasKey]!.collection = relation.related_collection!;
+				aliasMap[finalAliasKey]!.collection = relation.related_collection!;
 
 				isJoinAdded = true;
 			} else if (relationType === 'a2o') {
@@ -267,7 +277,7 @@ function addJoin({ path, collection, aliasMap, rootQuery, schema, relations, kne
 						);
 				});
 
-				aliasMap[aliasKey]!.collection = pathScope;
+				aliasMap[finalAliasKey]!.collection = pathScope;
 
 				isJoinAdded = true;
 			} else if (relationType === 'o2a') {
@@ -284,7 +294,7 @@ function addJoin({ path, collection, aliasMap, rootQuery, schema, relations, kne
 						);
 				});
 
-				aliasMap[aliasKey]!.collection = relation.collection;
+				aliasMap[finalAliasKey]!.collection = relation.collection;
 
 				hasMultiRelational = true;
 				isJoinAdded = true;
@@ -295,7 +305,7 @@ function addJoin({ path, collection, aliasMap, rootQuery, schema, relations, kne
 					`${alias}.${relation.field}`,
 				);
 
-				aliasMap[aliasKey]!.collection = relation.collection;
+				aliasMap[finalAliasKey]!.collection = relation.collection;
 
 				hasMultiRelational = true;
 				isJoinAdded = true;
@@ -406,6 +416,7 @@ export function applySort(
 			schema,
 			relations,
 			knex,
+			indexInAndArray: undefined,
 		});
 
 		const { columnPath } = getColumnPath({
@@ -474,7 +485,7 @@ export function applyFilter(
 
 	return { query: rootQuery, hasJoins, hasMultiRelationalFilter };
 
-	function addJoins(dbQuery: Knex.QueryBuilder, filter: Filter, collection: string) {
+	function addJoins(dbQuery: Knex.QueryBuilder, filter: Filter, collection: string, indexInAndArray?: number) {
 		// eslint-disable-next-line prefer-const
 		for (let [key, value] of Object.entries(filter)) {
 			if (key === '_or' || key === '_and') {
@@ -493,8 +504,8 @@ export function applyFilter(
 					}
 				}
 
-				value.forEach((subFilter: Record<string, any>) => {
-					addJoins(dbQuery, subFilter, collection);
+				value.forEach((subFilter: Record<string, any>, index: number) => {
+					addJoins(dbQuery, subFilter, collection, key === '_and' ? index : undefined);
 				});
 
 				continue;
@@ -514,6 +525,7 @@ export function applyFilter(
 					relations,
 					rootQuery,
 					aliasMap,
+					indexInAndArray,
 				});
 
 				if (!hasJoins) {
@@ -533,6 +545,7 @@ export function applyFilter(
 		filter: Filter,
 		collection: string,
 		logical: 'and' | 'or' = 'and',
+		indexInAndArray?: number,
 	) {
 		for (const [key, value] of Object.entries(filter)) {
 			if (key === '_or' || key === '_and') {
@@ -544,8 +557,15 @@ export function applyFilter(
 
 				/** @NOTE this callback function isn't called until Knex runs the query */
 				dbQuery[logical].where((subQuery) => {
-					value.forEach((subFilter: Record<string, any>) => {
-						addWhereClauses(knex, subQuery, subFilter, collection, key === '_and' ? 'and' : 'or');
+					value.forEach((subFilter: Record<string, any>, index: number) => {
+						addWhereClauses(
+							knex,
+							subQuery,
+							subFilter,
+							collection,
+							key === '_and' ? 'and' : 'or',
+							key === '_and' ? index : undefined,
+						);
 					});
 				});
 
@@ -632,6 +652,7 @@ export function applyFilter(
 					relations,
 					aliasMap,
 					schema,
+					indexInAndArray,
 				});
 
 				if (addNestedPkField) {
